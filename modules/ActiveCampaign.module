@@ -1,0 +1,269 @@
+<?php
+
+class ActiveCampaign extends WireData implements Module, ConfigurableModule {
+
+	public static function getModuleInfo() {
+  	return array(
+    	'title' => 'Active Campaign Integration',
+      'summary' => 'Integrates ProcessWire with an ActiveCampaign API.',
+      'version' => 1,
+			'author' => 'Sascha Gros',
+			'autoload' => false,
+			'singular' => true,
+			'icon' => 'cloud-upload', 
+    );
+  }
+
+	/**
+	 * Constructor function
+	 *
+	 */
+	public function __construct() {
+    // optionally set our default values before ProcessWire configures the module
+    $this->apiKey = '';
+    $this->url = '';
+		$this->listId = '';
+  }
+
+	/**
+	 * Initialize the module, setup hooks, or is blank if not needed. The function must be present however.
+	 *
+	 */
+  public function init() {
+
+  }
+	
+	/** 
+	 * Define the configuration parameters that are used by the module and must be given in the admin section.
+	 *
+	 * @param array $data
+	 * @return InputfieldWrapper
+	 */
+ 	public static function getModuleConfigInputfields(array $data) {
+    $inputfields = new InputfieldWrapper(); 
+ 
+    // ask for their the API key
+    $field = wire('modules')->get('InputfieldText');
+    $field->name = 'apiKey';
+    $field->label = "Enter your ActiveCampaign API Key";
+    if(isset($data['apiKey'])) $field->value = $data['apiKey'];
+    $inputfields->add($field); 
+ 
+    // ask for the API URL
+    $field = wire('modules')->get('InputfieldText'); 
+    $field->name = 'url';
+    $field->label = 'Enter your ActiveCampaign API URL (e.g. https://account.api-us1.com)';
+    if(isset($data['url'])) $field->value = $data['url'];
+    $inputfields->add($field);
+
+		// ask for the ActiveCampaign list name
+    $field = wire('modules')->get('InputfieldInteger'); 
+    $field->name = 'listId';
+    $field->label = 'Enter the ID of the list, where your new contacts shall be stored.';
+    if(isset($data['listId'])) $field->value = $data['listId'];
+    $inputfields->add($field);
+
+    return $inputfields; 
+  }
+
+	/**
+	 * Subscribe the user and add a new contact to the ActiveCampaign list given by the listId.
+	 * 
+	 * @param $email
+	 * @param $listId
+	 * @param $isStartup
+   * @return output string
+	 */
+	public function subscribeUser($email, $listId, $isStartup) {
+
+		$out = '';
+
+		$params = array(
+		  'api_key'      => $this->apiKey,
+		  'api_action'   => 'contact_add',
+		  'api_output'   => 'json'
+		);
+
+		// here we define the data we are posting in order to perform an update
+		$post = array(
+			'email'          => $email,
+			'tags'           => 'clowdfish API',
+		  //'first_name'   => 'FirstName',
+		  //'last_name'    => 'LastName',
+		  //'phone'        => '+1 1111111111',
+		  //'orgname'      => 'Acme, Inc.',
+
+		  // assign to lists (p[] and status[] can be given multiple times)
+		  'p['.$listId.']'                  => $listId,
+		  'status['.$listId.']'             => 1, // 1: active
+		  'instantresponders['.$listId.']'	=> 1, // set to 0 to if you don't want to sent instant autoresponders
+			'field[%IS_STARTUP_FIELD%, 0]' 		=> $isStartup
+		);
+
+		// convert input fields to a proper format
+		$query = "";
+		foreach( $params as $key => $value ) $query .= $key . '=' . urlencode($value) . '&';
+		$query = rtrim($query, '& ');
+
+		// convert input data to a proper format
+		$data = "";
+		foreach( $post as $key => $value ) $data .= $key . '=' . urlencode($value) . '&';
+		$data = rtrim($data, '& ');
+
+		// clean up the url
+		$url = rtrim($this->url, '/ ');
+
+		if ( !function_exists('curl_init') ) die('CURL not supported (introduced in PHP 4.0.2).');
+		if ( !function_exists('json_decode') ) die('JSON not supported (introduced in PHP 5.2.0).');
+
+		// define a final API request
+		$api = $url . '/admin/api.php?' . $query;		
+		$request = curl_init($api);
+
+		curl_setopt($request, CURLOPT_HEADER, 0); // set to 0 to eliminate header info from response
+		curl_setopt($request, CURLOPT_RETURNTRANSFER, 1); // Returns response data instead of TRUE(1)
+		curl_setopt($request, CURLOPT_POSTFIELDS, $data); // use HTTP POST to send form data
+		curl_setopt($request, CURLOPT_FOLLOWLOCATION, true);
+		//curl_setopt($request, CURLOPT_SSL_VERIFYPEER, FALSE); // uncomment if you get no gateway response and are using HTTPS
+
+		$response = (string)curl_exec($request); // execute curl post and store results in $response
+
+		// you can find documentation on curl options at http://www.php.net/curl_setopt
+		curl_close($request); // close curl object
+
+		if ( !$response ) {
+				die('Nothing was returned. Do you have a connection to Email Marketing server?');
+		}
+
+		// break the response into an array
+		$result = json_decode($response, true);
+
+		if($result['result_code']) {
+			$out .= __('You have been successfully subscribed to the clowdfish newsletter. Awesome!', 'ActiveCampaign');
+		}
+		else {
+			if(strpos($result['result_message'],'is in the system already', 'ActiveCampaign') !== false) {
+				$out .= __("You have been already subscribed to the newsletter. We love your eagerness!", 'ActiveCampaign');
+			}	
+			else {
+				$out .= __("Sorry, there was a problem subscribing you to the mailing list.", 'ActiveCampaign');
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Unsubscribe user and remove the contact from the ActiveCampaign list accordingly.
+	 * 
+	 * @param $email
+	 * @param $listId
+   * @return output string
+	 */
+	public function unsubscribeUser($email, $listId) {
+
+		$userId = $this->getUserId($email);
+		if($userId == -1)
+			return __("You have been already unsubscribed from the clowdfish newsletter.", 'ActiveCampaign');			
+	
+		$params = array(
+		  'api_key'      					=> $this->apiKey,
+		  'api_action'   					=> 'contact_delete',
+		  'api_output'  					=> 'json',
+			'id'										=> $userId,
+			'listids['.$listId.']'	=> $listId
+		);
+
+		// convert input fields to a proper format
+		$query = "";
+		foreach( $params as $key => $value ) $query .= $key . '=' . urlencode($value) . '&';
+		$query = rtrim($query, '& ');
+
+		$url = rtrim($this->url, '/ ');
+
+		if ( !function_exists('curl_init') ) die('CURL not supported (introduced in PHP 4.0.2).');
+		if ( !function_exists('json_decode') ) die('JSON not supported (introduced in PHP 5.2.0).');
+
+		// define a final API request - GET
+		$api = $url . '/admin/api.php?' . $query;
+
+		$request = curl_init($api); // initiate curl object
+
+		curl_setopt($request, CURLOPT_HEADER, 0); // set to 0 to eliminate header info from response
+		curl_setopt($request, CURLOPT_RETURNTRANSFER, 1); // Returns response data instead of TRUE(1)
+		curl_setopt($request, CURLOPT_FOLLOWLOCATION, true);
+		//curl_setopt($request, CURLOPT_SSL_VERIFYPEER, FALSE); // uncomment if you get no gateway response and are using HTTPS
+
+		$response = (string)curl_exec($request); // execute curl post and store results in $response
+
+		// you can find documentation on curl options at http://www.php.net/curl_setopt
+		curl_close($request); // close curl object
+
+		if ( !$response ) {
+				die('Nothing was returned. Do you have a connection to Email Marketing server?');
+		}
+
+		// break the response into an array
+		$result = json_decode($response, true);
+
+		if($result['result_code']) {
+			return __('You have been successfully unsubscribed from the clowdfish newsletter.', 'ActiveCampaign');
+		}
+		else {			
+			return __("Sorry, there was a problem unsubscribing you from the mailing list.", 'ActiveCampaign');			
+		}
+	}
+
+	/**
+	 * Find user based on his/her email address.
+	 * 
+	 * @param $email
+   * @return user id
+	 */
+	public function getUserId($email) {
+		
+		$params = array(
+		  'api_key'      => $this->apiKey,
+		  'api_action'   => 'contact_view_email',
+		  'api_output'   => 'json',
+		  'email'        => $email
+		);
+
+		// This section takes the input fields and converts them to the proper format
+		$query = "";
+		foreach( $params as $key => $value ) $query .= $key . '=' . urlencode($value) . '&';
+		$query = rtrim($query, '& ');
+
+		// clean up the url
+		$url = rtrim($this->url, '/ ');
+
+		if ( !function_exists('curl_init') ) die('CURL not supported. (introduced in PHP 4.0.2)');
+		if ( !function_exists('json_decode') ) die('JSON not supported. (introduced in PHP 5.2.0)');
+
+		// define a final API request - GET
+		$api = $url . '/admin/api.php?' . $query;
+
+		$request = curl_init($api); 
+
+		curl_setopt($request, CURLOPT_HEADER, 0); // set to 0 to eliminate header info from response
+		curl_setopt($request, CURLOPT_RETURNTRANSFER, 1); // Returns response data instead of TRUE(1)
+		curl_setopt($request, CURLOPT_FOLLOWLOCATION, true);
+		//curl_setopt($request, CURLOPT_SSL_VERIFYPEER, FALSE); // uncomment if you get no gateway response and are using HTTPS
+
+		$response = (string)curl_exec($request); 
+
+		// you can find documentation on curl options at http://www.php.net/curl_setopt
+		curl_close($request); // close curl object
+
+		if ( !$response ) {
+				die('Nothing was returned. Do you have a connection to Email Marketing server?');
+		}
+
+		// break the response into an array
+		$result = json_decode($response, true);
+
+		if($result['result_code']) {
+			return $result['id'];
+		}
+		return -1;		
+	}
+}
